@@ -19,7 +19,11 @@ byte-by-byte comparison.
 .SH OPTIONS
 .TP
 .B -r --recurse
-include files residing in subdirectories
+for every directory given follow subdirectories encountered within
+.TP
+.B -R --recurse:
+for each directory given after this option follow subdirectories
+encountered within
 .TP
 .B -s --symlinks
 follow symlinked directories
@@ -47,6 +51,10 @@ hide progress indicator
 prompt user for files to preserve, deleting all others (see
 .B CAVEATS
 below)
+.TP
+.B -N --noprompt
+when used together with --delete, preserve the first file in each
+set of duplicates and delete the others without prompting the user 
 .TP
 .B -v --version
 display fdupes version
