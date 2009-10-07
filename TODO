@@ -1,0 +1,5 @@
+- Add option to highlight or identify symlinked files.
+- Verify correctness of red-black tree algorithm. Optimize.
+- Fix problem where MD5 collisions will result in one of the
+  files not being registered (causing it to be ignored).
+
