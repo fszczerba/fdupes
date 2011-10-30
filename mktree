@@ -1,0 +1,40 @@
+#! /bin/bash
+
+source="${BASH_SOURCE[0]}"
+while [ -h "$source" ] ; do source="$(readlink "$source")"; done
+base="$( cd -P "$( dirname "$source" )" && pwd )"
+
+tgz="$base/testdir.tgz"
+deep=$1
+wide=$2
+base=$3
+
+[ -n "$deep" ] || deep=8
+[ -n "$wide" ] || wide=2
+[ -n "$base" ] || base=0
+
+function doit {
+	local deep=$1
+	local wide=$2
+	local i
+
+	let deep--
+
+	pwd
+	for (( i=base ; i<wide+base ; i++ )) ; do
+		dst=testdir_$i
+		tar xzf "$tgz"
+		mv testdir $dst
+		if [ $deep -gt 0 ] ; then
+			cd $dst
+			doit $deep $wide
+			cd ..
+		fi
+	done
+}
+
+rm -rf testdir
+tar xzf "$tgz"
+cd testdir
+doit $deep $wide
+cd ..
