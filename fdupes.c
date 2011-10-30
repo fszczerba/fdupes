@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/param.h>
 #include <dirent.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -51,6 +52,7 @@
 #define F_RECURSEAFTER      0x0200
 #define F_NOPROMPT          0x0400
 #define F_SUMMARIZEMATCHES  0x0800
+#define F_RELINKFILES       0x1000
 
 char *program_name;
 
@@ -88,6 +90,7 @@ typedef struct _file {
   dev_t device;
   ino_t inode;
   time_t mtime;
+  nlink_t nlinks;
   int hasdupes; /* true only if file is first on duplicate chain */
   struct _file *duplicates;
   struct _file *next;
@@ -160,6 +163,7 @@ int statfile(file_t * file,
   file->device = pinfo->st_dev;
   file->inode  = pinfo->st_ino;
   file->mtime  = pinfo->st_mtime;
+  file->nlinks = pinfo->st_nlink;
 
   return 1;
 }
@@ -178,6 +182,10 @@ ino_t getinode(const file_t *file) {
 
 const char *getname(const file_t *file) {
   return file->d_name;
+}
+
+nlink_t numlinks(const file_t *file) {
+  return file->nlinks;
 }
 
 char **cloneargs(int argc, char **argv)
@@ -667,29 +675,156 @@ char *revisefilename(char *path, int seq)
   return newpath;
 } */
 
-int relink(file_t *oldfile, file_t *newfile)
+int relink(file_t *linkto, file_t *linkfrom)
 {
+  char *temp;
+  char *dir;
+  char *p;
   dev_t od;
-  dev_t nd;
   ino_t oi;
-  ino_t ni;
 
-  od = getdevice(oldfile);
-  oi = getinode(oldfile);
+  od = getdevice(linkto);
+  oi = getinode(linkto);
 
-  if (link(getname(oldfile), getname(newfile)) != 0)
+  if (getdevice(linkfrom) != od) {
+    errno = EXDEV;
+    return 0;
+  }
+
+  // first try to create a link from a tempfile in the correct directory
+  dir = strdup(getname(linkfrom));
+  p = strrchr(dir, '/');
+  if (p)
+    *p = 0;
+  else {
+    free(dir);
+    dir = getcwd(NULL, MAXPATHLEN);
+  }
+
+  temp = tempnam(dir, NULL);
+  free(dir);
+
+  if (!temp)
     return 0;
 
-  // make sure we're working with the right file (the one we created)
-  statfile(newfile, NULL, NULL);
-  nd = getdevice(newfile);
-  ni = getinode(newfile);
+  if (link(getname(linkto), temp) != 0) {
+    free(temp);
+    return 0;
+  }
 
-  if (nd != od || oi != ni)
+  // now replace the old file with the new link
+  if (rename(temp, getname(linkfrom))) {
+    int saveerr = errno;
+    unlink(temp);
+    free(temp);
+    errno = saveerr;
+    return 0;
+  }
+
+  // make sure we're working with the right file (the one we created)
+  // need to refresh stat info from the file system
+  if (!statfile(linkfrom, NULL, NULL))
+    return 0; // stat failed
+
+  if (getdevice(linkfrom) != od || getinode(linkfrom) != oi) {
+    errno = EINVAL;
     return 0; // file is not what we expected
+  }
 
   return 1;
 }
+
+void relinkfiles(file_t *files)
+{
+  off_t total_saved = 0;
+  off_t saved = 0;
+  int relinked = 0;
+  int errors = 0;
+  int groups = 0;
+  int xdev = 0;
+  file_t *curfile;
+
+  for (curfile = files; curfile; curfile = curfile->next) {
+    if (curfile->hasdupes) {
+      file_t *dupfile;
+      file_t *linkto = curfile;
+      file_t *xdevfile = NULL;
+      int old_xdev = xdev;
+      int old_relinked = relinked;
+
+      saved = 0;
+      groups++;
+
+      for (linkto = curfile, xdevfile = NULL; linkto; linkto = xdevfile, xdevfile = NULL) {
+        dev_t dev = getdevice(linkto);
+        ino_t ino = getinode(linkto);
+        int links_made = 0;
+
+        for (dupfile = linkto->duplicates; dupfile; dupfile = dupfile->duplicates) {
+          if (dev == getdevice(dupfile)) {
+            // skip it if it's already a link to the correct inode
+            if (ino != getinode(dupfile)) {
+              nlink_t links;
+              off_t size;
+
+              // refresh cached stats to get the live link count
+              statfile(dupfile, NULL, NULL);
+              links = numlinks(dupfile);
+              size = filesize(dupfile);
+
+              if (links_made++ == 0) {
+                if (ISFLAG(flags, F_SHOWSIZE))
+                  printf("   [+] %s (%lld byte%s)\n", getname(linkto), filesize(linkto),
+                         filesize(linkto) == 1 ? "" : "s");
+                else
+                  printf("   [x] %s\n", getname(linkto));
+              }
+
+              if (relink(linkto, dupfile)) {
+                printf("   [h] %s\n", getname(dupfile));
+                relinked++;
+                // if this was the last link account for space savings
+                if (links == 1)
+                  saved += size;
+              } else {
+                errors++;
+                printf("   [!] %s: %s\n", getname(dupfile), strerror(errno));
+              }
+            }
+          } else if (xdevfile == NULL) {
+            // first duplicate on this device
+            xdev++;
+            xdevfile = dupfile;
+          }
+        }
+      }
+
+      total_saved += saved;
+      if (relinked != old_relinked) {
+        int links = relinked - old_relinked;
+        printf("   Saved %lld bytes on this group with %d link%s",
+               saved, links, links == 1 ? "" : "s");
+        if (xdev == old_xdev)
+          printf("\n");
+        else
+          printf(" (%d per-device link sets)\n", 1 + xdev - old_xdev);
+      }
+    }
+  }
+
+  if (relinked) {
+    printf("Relinked %d file%s in %d group%s",
+           relinked, relinked == 1 ? "" : "s",
+           groups, groups == 1 ? "" : "s");
+    if (xdev)
+      printf(" (%d unique link targets%s", groups + xdev,
+             errors ? ", " : ")");
+    if (errors)
+      printf("%s%d error%s)", xdev ? "" : " (", errors, errors == 1 ? "" : "s");
+    printf("\nSaved %lld bytes\n", total_saved);
+  }
+}
+
 
 void deletefiles(file_t *files, int prompt)
 {
@@ -835,27 +970,33 @@ void deletefiles(file_t *files, int prompt)
   free(preservestr);
 }
 
-int sort_pairs_by_arrival(file_t *f1, file_t *f2)
+int sort_pairs_by_mtime(const file_t *f1, const file_t *f2)
 {
-  if (f2->duplicates != 0)
-    return 1;
-
-  return -1;
+  // prefer the file with an earlier mtime
+  return f1->mtime - f2->mtime;
 }
 
-int sort_pairs_by_mtime(file_t *f1, file_t *f2)
+int sort_pairs_by_nlinks(const file_t *f1, const file_t *f2)
 {
-  if (f1->mtime < f2->mtime)
-    return -1;
-  else if (f1->mtime > f2->mtime)
-    return 1;
+  // prefer the file with more links
+  return f2->nlinks - f1->nlinks;
+}
 
-  //return sort_pairs_by_arrival(f1, f2);
-  return 0;
+int sort_pairs(const file_t *f1, const file_t *f2)
+{
+  int result = 0;
+
+  if (ISFLAG(flags, F_CONSIDERHARDLINKS))
+    result = sort_pairs_by_nlinks(f1, f2);
+  if (result == 0)
+    result = sort_pairs_by_mtime(f1, f2);
+  if (result == 0)
+    result = strcmp(getname(f1), getname(f2));
+  return result;
 }
 
 void registerpair(file_t **matchlist, file_t *newmatch, 
-		  int (*comparef)(file_t *f1, file_t *f2))
+		  int (*comparef)(const file_t *f1, const file_t *f2))
 {
   file_t *traverse;
   file_t *back;
@@ -924,10 +1065,13 @@ void help_text()
   printf("                  \twith -s or --symlinks, or when specifying a\n");
   printf("                  \tparticular directory more than once; refer to the\n");
   printf("                  \tfdupes documentation for additional information\n");
-  //printf(" -l --relink      \t(description)\n");
   printf(" -N --noprompt    \ttogether with --delete, preserve the first file in\n");
   printf("                  \teach set of duplicates and delete the rest without\n");
   printf("                  \twithout prompting the user\n");
+  printf(" -l --relink      \tcreate hardlinks for duplicates\n");
+  printf("                  \timplies --noempty and --hardlinks\n");
+  printf(" -L --relinkempty \tcreate hardlinks for all duplicates, including\n");
+  printf("                  \tempty files, implies --hardlinks\n");
   printf(" -v --version     \tdisplay fdupes version\n");
   printf(" -h --help        \tdisplay this help message\n\n");
 #ifdef OMIT_GETOPT_LONG
@@ -963,6 +1107,7 @@ int main(int argc, char **argv) {
     { "symlinks", 0, 0, 's' },
     { "hardlinks", 0, 0, 'H' },
     { "relink", 0, 0, 'l' },
+    { "relinkempty", 0, 0, 'L' },
     { "noempty", 0, 0, 'n' },
     { "delete", 0, 0, 'd' },
     { "version", 0, 0, 'v' },
@@ -981,7 +1126,7 @@ int main(int argc, char **argv) {
 
   oldargv = cloneargs(argc, argv);
 
-  while ((opt = GETOPT(argc, argv, "frRq1Ss::HlndvhNm"
+  while ((opt = GETOPT(argc, argv, "frRq1Ss::HlLndvhNm"
 #ifndef OMIT_GETOPT_LONG
           , long_options, NULL
 #endif
@@ -1009,6 +1154,15 @@ int main(int argc, char **argv) {
       SETFLAG(flags, F_FOLLOWLINKS);
       break;
     case 'H':
+      SETFLAG(flags, F_CONSIDERHARDLINKS);
+      break;
+    case 'l':
+      SETFLAG(flags, F_RELINKFILES);
+      SETFLAG(flags, F_EXCLUDEEMPTY);
+      SETFLAG(flags, F_CONSIDERHARDLINKS);
+      break;
+    case 'L':
+      SETFLAG(flags, F_RELINKFILES);
       SETFLAG(flags, F_CONSIDERHARDLINKS);
       break;
     case 'n':
@@ -1048,6 +1202,16 @@ int main(int argc, char **argv) {
 
   if (ISFLAG(flags, F_SUMMARIZEMATCHES) && ISFLAG(flags, F_DELETEFILES)) {
     errormsg("options --summarize and --delete are not compatible\n");
+    exit(1);
+  }
+
+  if (ISFLAG(flags, F_SUMMARIZEMATCHES) && ISFLAG(flags, F_RELINKFILES)) {
+    errormsg("options --summarize and --relink are not compatible\n");
+    exit(1);
+  }
+
+  if (ISFLAG(flags, F_RELINKFILES) && ISFLAG(flags, F_DELETEFILES)) {
+    errormsg("options --relink and --delete are not compatible\n");
     exit(1);
   }
 
@@ -1104,7 +1268,7 @@ int main(int argc, char **argv) {
       }
 
       if (confirmmatch(file1, file2)) {
-	registerpair(match, curfile, sort_pairs_by_mtime);
+	registerpair(match, curfile, sort_pairs);
 	
 	//match->hasdupes = 1;
         //curfile->duplicates = match->duplicates;
@@ -1129,6 +1293,8 @@ int main(int argc, char **argv) {
 
   if (ISFLAG(flags, F_DELETEFILES))
     deletefiles(files, !ISFLAG(flags, F_NOPROMPT));
+  else if (ISFLAG(flags, F_RELINKFILES))
+    relinkfiles(files);
   else if (ISFLAG(flags, F_SUMMARIZEMATCHES))
     summarizematches(files);
   else

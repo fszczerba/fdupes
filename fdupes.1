@@ -49,6 +49,14 @@ hide progress indicator
 .TP
 .B -d --delete
 prompt user for files to preserve, deleting all others (see
+.TP
+.B -l --relink
+replace duplicate files with hardlinks to the first file in the set;
+implies --noempty and --hardlinks
+.TP
+.B -L --relinkempty
+replace duplicate files with hardlinks to the first file in the set,
+even if the file is empty; implies --hardlinks
 .B CAVEATS
 below)
 .TP
@@ -79,6 +87,7 @@ or
 .B --sameline
 is specified, spaces and backslash characters  (\fB\e\fP) appearing
 in a filename are preceded by a backslash character.
+
 .SH CAVEATS
 If fdupes returns with an error message such as
 .B fdupes: error invoking md5sum
