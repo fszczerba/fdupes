@@ -53,6 +53,7 @@
 #define F_NOPROMPT          0x0400
 #define F_SUMMARIZEMATCHES  0x0800
 #define F_RELINKFILES       0x1000
+#define F_CHECKMETA         0x2000
 
 char *program_name;
 
@@ -91,6 +92,9 @@ typedef struct _file {
   ino_t inode;
   time_t mtime;
   nlink_t nlinks;
+  uid_t uid;
+  gid_t gid;
+  mode_t mode;
   int hasdupes; /* true only if file is first on duplicate chain */
   struct _file *duplicates;
   struct _file *next;
@@ -145,25 +149,24 @@ void escapefilename(char *escape_list, char **filename_ptr)
 }
 
 int statfile(file_t * file,
-             struct stat * pinfo,
              struct stat * plinfo)
 {
   struct stat info;
 
-  if (!pinfo)
-    pinfo = &info;
-
-  if (stat(file->d_name, pinfo) == -1)
+  if (stat(file->d_name, &info) == -1)
     return 0;
 
   if (plinfo && lstat(file->d_name, plinfo) == -1)
     return 0;
 
-  file->size   = pinfo->st_size;
-  file->device = pinfo->st_dev;
-  file->inode  = pinfo->st_ino;
-  file->mtime  = pinfo->st_mtime;
-  file->nlinks = pinfo->st_nlink;
+  file->size   = info.st_size;
+  file->device = info.st_dev;
+  file->inode  = info.st_ino;
+  file->mtime  = info.st_mtime;
+  file->nlinks = info.st_nlink;
+  file->uid    = info.st_uid;
+  file->gid    = info.st_gid;
+  file->mode   = info.st_mode;
 
   return 1;
 }
@@ -249,7 +252,6 @@ int grokdir(char *dir, file_t **filelistp)
   struct dirent *dirinfo;
   int length;
   int filecount = 0;
-  struct stat info;
   struct stat linfo;
   static int progress = 0;
   static char indicator[] = "-\\|/";
@@ -291,8 +293,8 @@ int grokdir(char *dir, file_t **filelistp)
         length--;
       sprintf(newfile->d_name + length, "/%s", dirinfo->d_name);
       
-      if (statfile(newfile, &info, &linfo)) {
-        if (S_ISDIR(info.st_mode)) {
+      if (statfile(newfile, &linfo)) {
+        if (S_ISDIR(newfile->mode)) {
           if (ISFLAG(flags, F_RECURSE) && (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode)))
             filecount += grokdir(newfile->d_name, filelistp);
         } else if (newfile->size || !ISFLAG(flags, F_EXCLUDEEMPTY)) {
@@ -451,9 +453,8 @@ int registerfile(filetree_t **branch, file_t *file)
 
 file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
 {
-  int cmpresult;
+  int cmpresult = 0;
   char *crcsignature;
-  off_t fsize;
 
   /* If device and inode fields are equal one of the files is a 
      hard link to the other or the files have been listed twice 
@@ -466,13 +467,19 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
       (getdevice(file) == getdevice(checktree->file)))
     return NULL; 
 
-  fsize = filesize(file);
-  
-  if (fsize < checktree->file->size) 
-    cmpresult = -1;
-  else 
-    if (fsize > checktree->file->size) cmpresult = 1;
-  else {
+  if (ISFLAG(flags, F_CHECKMETA)) {
+    if (cmpresult == 0)
+      cmpresult = file->uid - checktree->file->uid;
+    if (cmpresult == 0)
+      cmpresult = file->gid - checktree->file->gid;
+    if (cmpresult == 0)
+      cmpresult = file->mode - checktree->file->mode;
+  }
+
+  if (cmpresult == 0)
+    cmpresult = file->size - checktree->file->size;
+
+  if (cmpresult == 0) {
     if (checktree->file->crcpartial == NULL) {
       crcsignature = getcrcpartialsignature(checktree->file);
       if (crcsignature == NULL) return NULL;
@@ -723,7 +730,7 @@ int relink(file_t *linkto, file_t *linkfrom)
 
   // make sure we're working with the right file (the one we created)
   // need to refresh stat info from the file system
-  if (!statfile(linkfrom, NULL, NULL))
+  if (!statfile(linkfrom, NULL))
     return 0; // stat failed
 
   if (getdevice(linkfrom) != od || getinode(linkfrom) != oi) {
@@ -768,7 +775,7 @@ void relinkfiles(file_t *files)
               off_t size;
 
               // refresh cached stats to get the live link count
-              statfile(dupfile, NULL, NULL);
+              statfile(dupfile, NULL);
               links = numlinks(dupfile);
               size = filesize(dupfile);
 
@@ -1072,6 +1079,7 @@ void help_text()
   printf("                  \timplies --noempty and --hardlinks\n");
   printf(" -L --relinkempty \tcreate hardlinks for all duplicates, including\n");
   printf("                  \tempty files, implies --hardlinks\n");
+  printf(" -M --checkmeta   \tconsider ownership and permissions\n");
   printf(" -v --version     \tdisplay fdupes version\n");
   printf(" -h --help        \tdisplay this help message\n\n");
 #ifdef OMIT_GETOPT_LONG
@@ -1108,6 +1116,7 @@ int main(int argc, char **argv) {
     { "hardlinks", 0, 0, 'H' },
     { "relink", 0, 0, 'l' },
     { "relinkempty", 0, 0, 'L' },
+    { "checkmeta", 0, 0, 'M' },
     { "noempty", 0, 0, 'n' },
     { "delete", 0, 0, 'd' },
     { "version", 0, 0, 'v' },
@@ -1126,7 +1135,7 @@ int main(int argc, char **argv) {
 
   oldargv = cloneargs(argc, argv);
 
-  while ((opt = GETOPT(argc, argv, "frRq1Ss::HlLndvhNm"
+  while ((opt = GETOPT(argc, argv, "frRq1Ss::HlLMndvhNm"
 #ifndef OMIT_GETOPT_LONG
           , long_options, NULL
 #endif
@@ -1164,6 +1173,9 @@ int main(int argc, char **argv) {
     case 'L':
       SETFLAG(flags, F_RELINKFILES);
       SETFLAG(flags, F_CONSIDERHARDLINKS);
+      break;
+    case 'M':
+      SETFLAG(flags, F_CHECKMETA);
       break;
     case 'n':
       SETFLAG(flags, F_EXCLUDEEMPTY);
