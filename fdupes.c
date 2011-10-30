@@ -479,9 +479,10 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
      duplicates unless the user specifies otherwise.
   */    
 
-  if (!ISFLAG(flags, F_CONSIDERHARDLINKS) && (getinode(file->d_name) == 
-      checktree->file->inode) && (getdevice(file->d_name) ==
-      checktree->file->device)) return NULL; 
+  if (!ISFLAG(flags, F_CONSIDERHARDLINKS) &&
+      (getinode(file->d_name) == checktree->file->inode) &&
+      (getdevice(file->d_name) == checktree->file->device))
+    return NULL; 
 
   fsize = filesize(file->d_name);
   
@@ -643,8 +644,9 @@ void printmatches(file_t *files)
   while (files != NULL) {
     if (files->hasdupes) {
       if (!ISFLAG(flags, F_OMITFIRST)) {
-	if (ISFLAG(flags, F_SHOWSIZE)) printf("%ld byte%seach:\n", files->size,
-	 (files->size != 1) ? "s " : " ");
+	if (ISFLAG(flags, F_SHOWSIZE))
+          printf("%lld byte%seach:\n", files->size,
+                 (files->size != 1) ? "s " : " ");
 	if (ISFLAG(flags, F_DSAMELINE)) escapefilename("\\ ", &files->d_name);
 	printf("%s%c", files->d_name, ISFLAG(flags, F_DSAMELINE)?' ':'\n');
       }
@@ -796,8 +798,9 @@ void deletefiles(file_t *files, int prompt)
       do {
 	printf("Set %d of %d, preserve files [1 - %d, all]", 
           curgroup, groups, counter);
-	if (ISFLAG(flags, F_SHOWSIZE)) printf(" (%ld byte%seach)", files->size,
-	  (files->size != 1) ? "s " : " ");
+	if (ISFLAG(flags, F_SHOWSIZE))
+          printf(" (%lld byte%seach)", files->size,
+                 (files->size != 1) ? "s " : " ");
 	printf(": ");
 	fflush(stdout);
 
@@ -1151,24 +1154,15 @@ int main(int argc, char **argv) {
     }
   }
 
-  if (!ISFLAG(flags, F_HIDEPROGRESS)) fprintf(stderr, "\r%40s\r", " ");
+  if (!ISFLAG(flags, F_HIDEPROGRESS))
+    fprintf(stderr, "\r%40s\r", " ");
 
   if (ISFLAG(flags, F_DELETEFILES))
-  {
-    if (ISFLAG(flags, F_NOPROMPT))
-      deletefiles(files, 0);
-    else
-      deletefiles(files, 1);
-  }
-
-  else 
-
-    if (ISFLAG(flags, F_SUMMARIZEMATCHES))
-      summarizematches(files);
-      
-    else
-
-      printmatches(files);
+    deletefiles(files, !ISFLAG(flags, F_NOPROMPT));
+  else if (ISFLAG(flags, F_SUMMARIZEMATCHES))
+    summarizematches(files);
+  else
+    printmatches(files);
 
   while (files) {
     curfile = files->next;
