@@ -141,36 +141,43 @@ void escapefilename(char *escape_list, char **filename_ptr)
   }
 }
 
-off_t filesize(char *filename) {
-  struct stat s;
+int statfile(file_t * file,
+             struct stat * pinfo,
+             struct stat * plinfo)
+{
+  struct stat info;
 
-  if (stat(filename, &s) != 0) return -1;
+  if (!pinfo)
+    pinfo = &info;
 
-  return s.st_size;
+  if (stat(file->d_name, pinfo) == -1)
+    return 0;
+
+  if (plinfo && lstat(file->d_name, plinfo) == -1)
+    return 0;
+
+  file->size   = pinfo->st_size;
+  file->device = pinfo->st_dev;
+  file->inode  = pinfo->st_ino;
+  file->mtime  = pinfo->st_mtime;
+
+  return 1;
 }
 
-dev_t getdevice(char *filename) {
-  struct stat s;
-
-  if (stat(filename, &s) != 0) return 0;
-
-  return s.st_dev;
+off_t filesize(const file_t *file) {
+  return file->size;
 }
 
-ino_t getinode(char *filename) {
-  struct stat s;
-   
-  if (stat(filename, &s) != 0) return 0;
-
-  return s.st_ino;   
+dev_t getdevice(const file_t *file) {
+  return file->device;
 }
 
-time_t getmtime(char *filename) {
-  struct stat s;
+ino_t getinode(const file_t *file) {
+  return file->inode;
+}
 
-  if (stat(filename, &s) != 0) return 0;
-
-  return s.st_mtime;
+const char *getname(const file_t *file) {
+  return file->d_name;
 }
 
 char **cloneargs(int argc, char **argv)
@@ -276,38 +283,21 @@ int grokdir(char *dir, file_t **filelistp)
         length--;
       sprintf(newfile->d_name + length, "/%s", dirinfo->d_name);
       
-      if (filesize(newfile->d_name) == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
-	free(newfile->d_name);
-	free(newfile);
-	continue;
+      if (statfile(newfile, &info, &linfo)) {
+        if (S_ISDIR(info.st_mode)) {
+          if (ISFLAG(flags, F_RECURSE) && (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode)))
+            filecount += grokdir(newfile->d_name, filelistp);
+        } else if (newfile->size || !ISFLAG(flags, F_EXCLUDEEMPTY)) {
+          if (S_ISREG(linfo.st_mode) || (S_ISLNK(linfo.st_mode) && ISFLAG(flags, F_FOLLOWLINKS))) {
+            *filelistp = newfile;
+            filecount++;
+            continue;
+          }
+        }
       }
 
-      if (stat(newfile->d_name, &info) == -1) {
-	free(newfile->d_name);
-	free(newfile);
-	continue;
-      }
-
-      if (lstat(newfile->d_name, &linfo) == -1) {
-	free(newfile->d_name);
-	free(newfile);
-	continue;
-      }
-
-      if (S_ISDIR(info.st_mode)) {
-	if (ISFLAG(flags, F_RECURSE) && (ISFLAG(flags, F_FOLLOWLINKS) || !S_ISLNK(linfo.st_mode)))
-	  filecount += grokdir(newfile->d_name, filelistp);
-	free(newfile->d_name);
-	free(newfile);
-      } else {
-	if (S_ISREG(linfo.st_mode) || (S_ISLNK(linfo.st_mode) && ISFLAG(flags, F_FOLLOWLINKS))) {
-	  *filelistp = newfile;
-	  filecount++;
-	} else {
-	  free(newfile->d_name);
-	  free(newfile);
-	}
-      }
+      free(newfile->d_name);
+      free(newfile);
     }
   }
 
@@ -320,7 +310,7 @@ int grokdir(char *dir, file_t **filelistp)
 
 /* If EXTERNAL_MD5 is not defined, use L. Peter Deutsch's MD5 library. 
  */
-char *getcrcsignatureuntil(char *filename, off_t max_read)
+char *getcrcsignatureuntil(const file_t *file, off_t max_read)
 {
   int x;
   off_t fsize;
@@ -330,27 +320,28 @@ char *getcrcsignatureuntil(char *filename, off_t max_read)
   static md5_byte_t chunk[CHUNK_SIZE];
   static char signature[16*2 + 1]; 
   char *sigp;
-  FILE *file;
+  FILE *filep;
+  const char *filename;
    
   md5_init(&state);
-
  
-  fsize = filesize(filename);
+  fsize = filesize(file);
+  filename = getname(file);
   
   if (max_read != 0 && fsize > max_read)
     fsize = max_read;
 
-  file = fopen(filename, "rb");
-  if (file == NULL) {
+  filep = fopen(filename, "rb");
+  if (filep == NULL) {
     errormsg("error opening file %s\n", filename);
     return NULL;
   }
  
   while (fsize > 0) {
     toread = (fsize % CHUNK_SIZE) ? (fsize % CHUNK_SIZE) : CHUNK_SIZE;
-    if (fread(chunk, toread, 1, file) != 1) {
+    if (fread(chunk, toread, 1, filep) != 1) {
       errormsg("error reading from file %s\n", filename);
-      fclose(file); // bugfix
+      fclose(filep); // bugfix
       return NULL;
     }
     md5_append(&state, chunk, toread);
@@ -366,19 +357,19 @@ char *getcrcsignatureuntil(char *filename, off_t max_read)
     sigp = strchr(sigp, '\0');
   }
 
-  fclose(file);
+  fclose(filep);
 
   return signature;
 }
 
-char *getcrcsignature(char *filename)
+char *getcrcsignature(const file_t *file)
 {
-  return getcrcsignatureuntil(filename, 0);
+  return getcrcsignatureuntil(file, 0);
 }
 
-char *getcrcpartialsignature(char *filename)
+char *getcrcpartialsignature(const file_t *file)
 {
-  return getcrcsignatureuntil(filename, PARTIAL_MD5_SIZE);
+  return getcrcsignatureuntil(file, PARTIAL_MD5_SIZE);
 }
 
 #endif /* [#ifndef EXTERNAL_MD5] */
@@ -387,13 +378,15 @@ char *getcrcpartialsignature(char *filename)
 
 /* If EXTERNAL_MD5 is defined, use md5sum program to calculate signatures.
  */
-char *getcrcsignature(char *filename)
+char *getcrcsignature(const file_t *file)
 {
   static char signature[256];
   char *command;
   char *separator;
   FILE *result;
+  const char *filename;
 
+  filename = getname(file);
   command = (char*) malloc(strlen(filename)+strlen(EXTERNAL_MD5)+2);
   if (command == NULL) {
     errormsg("out of memory\n");
@@ -433,18 +426,8 @@ void purgetree(filetree_t *checktree)
   free(checktree);
 }
 
-void getfilestats(file_t *file)
-{
-  file->size = filesize(file->d_name);
-  file->inode = getinode(file->d_name);
-  file->device = getdevice(file->d_name);
-  file->mtime = getmtime(file->d_name);
-}
-
 int registerfile(filetree_t **branch, file_t *file)
 {
-  getfilestats(file);
-
   *branch = (filetree_t*) malloc(sizeof(filetree_t));
   if (*branch == NULL) {
     errormsg("out of memory!\n");
@@ -471,11 +454,11 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
   */    
 
   if (!ISFLAG(flags, F_CONSIDERHARDLINKS) &&
-      (getinode(file->d_name) == checktree->file->inode) &&
-      (getdevice(file->d_name) == checktree->file->device))
+      (getinode(file) == getinode(checktree->file)) &&
+      (getdevice(file) == getdevice(checktree->file)))
     return NULL; 
 
-  fsize = filesize(file->d_name);
+  fsize = filesize(file);
   
   if (fsize < checktree->file->size) 
     cmpresult = -1;
@@ -483,7 +466,7 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
     if (fsize > checktree->file->size) cmpresult = 1;
   else {
     if (checktree->file->crcpartial == NULL) {
-      crcsignature = getcrcpartialsignature(checktree->file->d_name);
+      crcsignature = getcrcpartialsignature(checktree->file);
       if (crcsignature == NULL) return NULL;
 
       checktree->file->crcpartial = strdup(crcsignature);
@@ -494,7 +477,7 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
     }
 
     if (file->crcpartial == NULL) {
-      crcsignature = getcrcpartialsignature(file->d_name);
+      crcsignature = getcrcpartialsignature(file);
       if (crcsignature == NULL) return NULL;
 
       file->crcpartial = strdup(crcsignature);
@@ -509,7 +492,7 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
 
     if (cmpresult == 0) {
       if (checktree->file->crcsignature == NULL) {
-	crcsignature = getcrcsignature(checktree->file->d_name);
+	crcsignature = getcrcsignature(checktree->file);
 	if (crcsignature == NULL) return NULL;
 
 	checktree->file->crcsignature = strdup(crcsignature);
@@ -520,7 +503,7 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
       }
 
       if (file->crcsignature == NULL) {
-	crcsignature = getcrcsignature(file->d_name);
+	crcsignature = getcrcsignature(file);
 	if (crcsignature == NULL) return NULL;
 
 	file->crcsignature = strdup(crcsignature);
@@ -555,7 +538,6 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
     }
   } else 
   {
-    getfilestats(file);
     return &checktree->file;
   }
 }
@@ -685,7 +667,7 @@ char *revisefilename(char *path, int seq)
   return newpath;
 } */
 
-int relink(char *oldfile, char *newfile)
+int relink(file_t *oldfile, file_t *newfile)
 {
   dev_t od;
   dev_t nd;
@@ -695,10 +677,11 @@ int relink(char *oldfile, char *newfile)
   od = getdevice(oldfile);
   oi = getinode(oldfile);
 
-  if (link(oldfile, newfile) != 0)
+  if (link(getname(oldfile), getname(newfile)) != 0)
     return 0;
 
   // make sure we're working with the right file (the one we created)
+  statfile(newfile, NULL, NULL);
   nd = getdevice(newfile);
   ni = getinode(newfile);
 
