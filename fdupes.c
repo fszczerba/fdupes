@@ -185,14 +185,12 @@ char **cloneargs(int argc, char **argv)
   }
 
   for (x = 0; x < argc; x++) {
-    args[x] = (char*) malloc(strlen(argv[x]) + 1);
+    args[x] = strdup(argv[x]);
     if (args[x] == NULL) {
       free(args);
       errormsg("out of memory!\n");
       exit(1);
     }
-
-    strcpy(args[x], argv[x]);
   }
 
   return args;
@@ -234,7 +232,7 @@ int grokdir(char *dir, file_t **filelistp)
   DIR *cd;
   file_t *newfile;
   struct dirent *dirinfo;
-  int lastchar;
+  int length;
   int filecount = 0;
   struct stat info;
   struct stat linfo;
@@ -255,21 +253,15 @@ int grokdir(char *dir, file_t **filelistp)
 	progress = (progress + 1) % 4;
       }
 
-      newfile = (file_t*) malloc(sizeof(file_t));
+      newfile = (file_t*) calloc(1, sizeof(file_t));
 
       if (!newfile) {
 	errormsg("out of memory!\n");
 	closedir(cd);
 	exit(1);
-      } else newfile->next = *filelistp;
+      }
 
-      newfile->device = 0;
-      newfile->inode = 0;
-      newfile->crcsignature = NULL;
-      newfile->crcpartial = NULL;
-      newfile->duplicates = NULL;
-      newfile->hasdupes = 0;
-
+      newfile->next = *filelistp;
       newfile->d_name = (char*)malloc(strlen(dir)+strlen(dirinfo->d_name)+2);
 
       if (!newfile->d_name) {
@@ -279,11 +271,10 @@ int grokdir(char *dir, file_t **filelistp)
 	exit(1);
       }
 
-      strcpy(newfile->d_name, dir);
-      lastchar = strlen(dir) - 1;
-      if (lastchar >= 0 && dir[lastchar] != '/')
-	strcat(newfile->d_name, "/");
-      strcat(newfile->d_name, dirinfo->d_name);
+      length = sprintf(newfile->d_name, "%s", dir);
+      if (length > 0 && dir[length-1] == '/')
+        length--;
+      sprintf(newfile->d_name + length, "/%s", dirinfo->d_name);
       
       if (filesize(newfile->d_name) == 0 && ISFLAG(flags, F_EXCLUDEEMPTY)) {
 	free(newfile->d_name);
@@ -495,24 +486,22 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
       crcsignature = getcrcpartialsignature(checktree->file->d_name);
       if (crcsignature == NULL) return NULL;
 
-      checktree->file->crcpartial = (char*) malloc(strlen(crcsignature)+1);
+      checktree->file->crcpartial = strdup(crcsignature);
       if (checktree->file->crcpartial == NULL) {
 	errormsg("out of memory\n");
 	exit(1);
       }
-      strcpy(checktree->file->crcpartial, crcsignature);
     }
 
     if (file->crcpartial == NULL) {
       crcsignature = getcrcpartialsignature(file->d_name);
       if (crcsignature == NULL) return NULL;
 
-      file->crcpartial = (char*) malloc(strlen(crcsignature)+1);
+      file->crcpartial = strdup(crcsignature);
       if (file->crcpartial == NULL) {
 	errormsg("out of memory\n");
 	exit(1);
       }
-      strcpy(file->crcpartial, crcsignature);
     }
 
     cmpresult = strcmp(file->crcpartial, checktree->file->crcpartial);
@@ -523,24 +512,22 @@ file_t **checkmatch(filetree_t **root, filetree_t *checktree, file_t *file)
 	crcsignature = getcrcsignature(checktree->file->d_name);
 	if (crcsignature == NULL) return NULL;
 
-	checktree->file->crcsignature = (char*) malloc(strlen(crcsignature)+1);
+	checktree->file->crcsignature = strdup(crcsignature);
 	if (checktree->file->crcsignature == NULL) {
 	  errormsg("out of memory\n");
 	  exit(1);
 	}
-	strcpy(checktree->file->crcsignature, crcsignature);
       }
 
       if (file->crcsignature == NULL) {
 	crcsignature = getcrcsignature(file->d_name);
 	if (crcsignature == NULL) return NULL;
 
-	file->crcsignature = (char*) malloc(strlen(crcsignature)+1);
+	file->crcsignature = strdup(crcsignature);
 	if (file->crcsignature == NULL) {
 	  errormsg("out of memory\n");
 	  exit(1);
 	}
-	strcpy(file->crcsignature, crcsignature);
       }
 
       cmpresult = strcmp(file->crcsignature, checktree->file->crcsignature);
